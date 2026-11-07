@@ -1,0 +1,317 @@
+// ==UserScript==
+// @name         Civitai.red Tag Saver / Loader Dropdown
+// @namespace    Civitai-red-Tag-Saver
+// @version      1.2
+// @description  Adds a "Saved Tags" dropdown next to Everyone / Reactions / Filters on civitai.red Images & Videos. Save the current ?tags= set under a name, click to reload it.
+// @author       Boatman
+// @match        https://civitai.red/*
+// @match        *://civitai.red/*
+// @match        https://civitai.red/videos
+// @grant        GM_openInTab
+// @grant        GM.openInTab
+// @grant        GM_xmlhttpRequest
+// @grant        GM_addStyle
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_download
+// @grant        unsafeWindow
+// @run-at       document-start
+// ==/UserScript==
+
+/*
+    Author: Boatman
+    Civitai: https://civitai.red/user/boatsman
+    Github: https://github.com/Boatsman-Civ
+    Greasyfork: https://greasyfork.org/en/users/1661950-boatsman-civ
+*/
+
+(function () {
+  'use strict';
+  // Never run in iframes / embeds — only the top page. Prevents any chance of
+  // interfering with login widgets, payment frames, Cloudflare challenges, etc.
+  try { if (window.top !== window.self) return; } catch { return; }
+  // Singleton: never run twice even if installed twice / double-injected.
+  if (window.__civitTagsaverLoaded) return;
+  window.__civitTagsaverLoaded = true;
+
+  const STORE_KEY = 'civitai_tag_presets_v1';
+  const BTN_ID = 'civit-tagsaver-btn';
+  const MENU_ID = 'civit-tagsaver-menu';
+
+  /* ---------- storage ---------- */
+  function loadPresets() {
+    try {
+      const raw = localStorage.getItem(STORE_KEY);
+      if (!raw) return [];
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr : [];
+    } catch { return []; }
+  }
+  function savePresets(list) {
+    localStorage.setItem(STORE_KEY, JSON.stringify(list));
+  }
+
+  /* ---------- url helpers ---------- */
+  function getCurrentTags() {
+    return new URLSearchParams(location.search).get('tags') || '';
+  }
+  function applyTags(tagsValue) {
+    const url = new URL(location.href);
+    if (tagsValue && tagsValue.trim()) url.searchParams.set('tags', tagsValue.trim());
+    else url.searchParams.delete('tags');
+    // keep view/sort/period/etc untouched — only swap tags
+    location.href = url.toString();
+  }
+
+  /* ---------- toolbar lookup ---------- */
+  function findWrapper() {
+    // primary: exact class seen on /images and /videos
+    let w = document.querySelector('.-Hp08W_filtersWrapper');
+    if (w) return w;
+    // fallback: find the "Filters" button and walk up to the group containing "Everyone"
+    // (no array spread — feeds can contain thousands of buttons)
+    let filtersBtn = null;
+    for (const b of document.querySelectorAll('button')) {
+      if (b.textContent.trim() === 'Filters') { filtersBtn = b; break; }
+    }
+    if (filtersBtn) {
+      let el = filtersBtn.parentElement;
+      for (let i = 0; i < 5 && el; i++) {
+        const kids = [...el.children].map(c => c.textContent.trim());
+        if (kids.some(t => t.startsWith('Everyone'))) return el;
+        el = el.parentElement;
+      }
+    }
+    return null;
+  }
+
+  /* ---------- ui ---------- */
+  function closeMenu() {
+    document.getElementById(MENU_ID)?.remove();
+    document.getElementById(BTN_ID)?.setAttribute('aria-expanded', 'false');
+  }
+
+  function buildMenu(anchorBtn) {
+    closeMenu();
+    anchorBtn.setAttribute('aria-expanded', 'true');
+    const presets = loadPresets();
+    const current = getCurrentTags();
+
+    const menu = document.createElement('div');
+    menu.id = MENU_ID;
+    menu.style.cssText = [
+      'position:absolute', 'z-index:99999', 'min-width:300px', 'max-width:340px',
+      'background:#1f2937', 'color:#f3f4f6', 'border:1px solid #374151',
+      'border-radius:12px', 'box-shadow:0 12px 32px rgba(0,0,0,.5)',
+      'padding:10px', 'font-size:13px', 'font-family:inherit'
+    ].join(';');
+
+    const cur = document.createElement('div');
+    cur.style.cssText = 'padding:4px 6px 8px;color:#9ca3af;word-break:break-all;';
+    cur.innerHTML = `Current <b style="color:#e5e7eb">tags=</b><code style="color:#93c5fd">${current ? escapeHtml(current) : '(none — showing All)'}</code>`;
+    menu.appendChild(cur);
+
+    // save row
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:6px;margin-bottom:8px;';
+    const input = document.createElement('input');
+    input.placeholder = 'Name this tag set…';
+    input.style.cssText = 'flex:1;background:#111827;border:1px solid #374151;color:#f3f4f6;border-radius:8px;padding:7px 9px;outline:none;';
+    const saveBtn = document.createElement('button');
+    saveBtn.textContent = 'Save';
+    saveBtn.style.cssText = 'background:#2563eb;border:none;color:#fff;border-radius:8px;padding:7px 12px;font-weight:700;cursor:pointer;white-space:nowrap;';
+    saveBtn.onclick = () => {
+      const name = input.value.trim() || `Set ${presets.length + 1} (${current || 'All'})`;
+      if (!current) { alert('No tags selected — open a tag first (URL has no ?tags=). Saving "All" is allowed.'); }
+      const list = loadPresets();
+      const existing = list.findIndex(p => p.name === name);
+      const entry = { name, tags: current, savedAt: new Date().toISOString() };
+      if (existing >= 0) list[existing] = entry; else list.push(entry);
+      savePresets(list);
+      buildMenu(anchorBtn); // refresh
+      refreshBtnLabel();
+    };
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') saveBtn.click(); e.stopPropagation(); });
+    row.appendChild(input);
+    row.appendChild(saveBtn);
+    menu.appendChild(row);
+
+    // preset list
+    const listBox = document.createElement('div');
+    listBox.style.cssText = 'max-height:260px;overflow-y:auto;display:flex;flex-direction:column;gap:4px;';
+    if (!presets.length) {
+      const empty = document.createElement('div');
+      empty.style.cssText = 'color:#9ca3af;padding:8px 6px;text-align:center;';
+      empty.textContent = 'No saved tag sets yet. Filter by a tag, then Save it here.';
+      listBox.appendChild(empty);
+    }
+    presets.forEach((p, i) => {
+      const item = document.createElement('div');
+      item.style.cssText = `display:flex;align-items:center;gap:6px;padding:7px 8px;border-radius:8px;cursor:pointer;border:1px solid ${p.tags === current ? '#2563eb' : 'transparent'};background:${p.tags === current ? '#1e3a8a55' : '#111827'};`;
+      item.title = `Load tags=${p.tags || '(none)'}`;
+
+      const label = document.createElement('span');
+      label.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+      label.innerHTML = `<b>${escapeHtml(p.name)}</b><br><code style="color:#93c5fd;font-size:11px">${escapeHtml(p.tags || '(All)')}</code>`;
+
+      const load = document.createElement('button');
+      load.textContent = 'Load';
+      load.style.cssText = 'background:#374151;border:none;color:#fff;border-radius:6px;padding:5px 10px;cursor:pointer;font-weight:600;';
+      load.onclick = (e) => { e.stopPropagation(); applyTags(p.tags); };
+
+      const del = document.createElement('button');
+      del.textContent = '✕';
+      del.title = 'Delete';
+      del.style.cssText = 'background:transparent;border:none;color:#9ca3af;border-radius:6px;padding:5px 8px;cursor:pointer;';
+      del.onmouseenter = () => del.style.color = '#f87171';
+      del.onclick = (e) => {
+        e.stopPropagation();
+        if (!confirm(`Delete "${p.name}"?`)) return;
+        const list = loadPresets(); list.splice(i, 1); savePresets(list);
+        buildMenu(anchorBtn); refreshBtnLabel();
+      };
+
+      item.onclick = () => applyTags(p.tags);
+      item.appendChild(label);
+      item.appendChild(load);
+      item.appendChild(del);
+      listBox.appendChild(item);
+    });
+    menu.appendChild(listBox);
+
+    // footer: clear + export/import
+    const foot = document.createElement('div');
+    foot.style.cssText = 'display:flex;gap:6px;margin-top:8px;align-items:center;';
+    const clearBtn = document.createElement('button');
+    clearBtn.textContent = 'Clear tags (All)';
+    clearBtn.style.cssText = 'flex:1;background:#374151;border:none;color:#fff;border-radius:8px;padding:6px;cursor:pointer;';
+    clearBtn.onclick = () => applyTags('');
+    const expBtn = document.createElement('button');
+    expBtn.textContent = '⤓';
+    expBtn.title = 'Export JSON';
+    expBtn.style.cssText = 'background:#111827;border:1px solid #374151;color:#e5e7eb;border-radius:8px;padding:6px 9px;cursor:pointer;';
+    expBtn.onclick = () => {
+      const blob = new Blob([localStorage.getItem(STORE_KEY) || '[]'], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = 'civitai-tag-presets.json'; a.click();
+    };
+    const impLabel = document.createElement('label');
+    impLabel.textContent = '⤒';
+    impLabel.title = 'Import JSON';
+    impLabel.style.cssText = 'background:#111827;border:1px solid #374151;color:#e5e7eb;border-radius:8px;padding:6px 9px;cursor:pointer;';
+    const impFile = document.createElement('input');
+    impFile.type = 'file'; impFile.accept = '.json,application/json'; impFile.style.display = 'none';
+    impFile.onchange = () => {
+      const f = impFile.files[0]; if (!f) return;
+      const r = new FileReader();
+      r.onload = () => {
+        try {
+          const arr = JSON.parse(r.result);
+          if (!Array.isArray(arr)) throw 0;
+          savePresets(arr); buildMenu(anchorBtn); refreshBtnLabel();
+        } catch { alert('Invalid preset JSON file.'); }
+      };
+      r.readAsText(f);
+    };
+    impLabel.appendChild(impFile);
+    foot.appendChild(clearBtn);
+    foot.appendChild(expBtn);
+    foot.appendChild(impLabel);
+    menu.appendChild(foot);
+
+    // position under button
+    const r = anchorBtn.getBoundingClientRect();
+    menu.style.top = (r.bottom + window.scrollY + 8) + 'px';
+    menu.style.left = Math.max(8, Math.min(r.left + window.scrollX, document.documentElement.scrollWidth - 350)) + 'px';
+    menu.style.position = 'absolute';
+    document.body.appendChild(menu);
+
+    setTimeout(() => document.addEventListener('click', outside, { once: true }), 0);
+    function outside(e) {
+      if (!menu.isConnected) return;
+      if (menu.contains(e.target) || anchorBtn.contains(e.target)) {
+        document.addEventListener('click', outside, { once: true });
+        return;
+      }
+      closeMenu();
+    }
+    document.addEventListener('keydown', function esc(e) {
+      if (e.key === 'Escape') { closeMenu(); document.removeEventListener('keydown', esc); }
+    });
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function refreshBtnLabel() {
+    const label = document.querySelector(`#${BTN_ID} [data-ts-label]`);
+    if (label) {
+      const n = loadPresets().length;
+      const cur = getCurrentTags();
+      label.textContent = n ? `Tags ★ (${n})` : 'Tags ★';
+      const btn = document.getElementById(BTN_ID);
+      if (btn) btn.title = cur ? `Saved tag sets — current tags=${cur}` : 'Saved tag sets — currently All';
+    }
+  }
+
+  function inject() {
+    if (document.getElementById(BTN_ID)) { refreshBtnLabel(); return true; }
+    const wrapper = findWrapper();
+    if (!wrapper) return false;
+
+    const btn = document.createElement('button');
+    btn.id = BTN_ID;
+    btn.setAttribute('aria-haspopup', 'menu');
+    btn.setAttribute('aria-expanded', 'false');
+    // match native Everyone/Reactions/Filters styling
+    btn.className = 'flex items-center gap-1 rounded-3xl border-none text-sm font-semibold text-gray-8 dark:text-white h-8 px-2 bg-transparent hover:bg-gray-2 data-[expanded=true]:bg-gray-2 dark:hover:bg-dark-5 dark:data-[expanded=true]:bg-dark-4';
+    btn.style.cssText = 'cursor:pointer;';
+    btn.innerHTML = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v-6"/><path d="M9 10l3 3 3-3"/><path d="M3 4h18v2.172a2 2 0 0 1 -.586 1.414l-4.414 4.414v7l-6 2v-8.5l-4.48 -4.928a2 2 0 0 1 -.52 -1.345v-2.227z"/></svg>
+      <span data-ts-label>Tags ★</span>
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6l6 -6"/></svg>`;
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      if (document.getElementById(MENU_ID)) closeMenu();
+      else buildMenu(btn);
+    };
+    wrapper.appendChild(btn);
+    refreshBtnLabel();
+    return true;
+  }
+
+  // Scheduling WITHOUT any persistent observer or interval. v1.0.x kept a
+  // document-wide subtree observer alive, and gallery pages mutate the DOM
+  // constantly (animated reaction counters, lazy video cards), which hung tabs.
+  // Now: inject on load + a short bounded retry chain, and re-check only right
+  // after SPA navigations. Nothing runs in the background between navigations.
+  function safeInject() { try { return inject(); } catch (err) { console.warn('[tagsaver]', err); return false; } }
+  function scheduleRetries() {
+    [400, 1200, 2500, 5000].forEach(ms =>
+      setTimeout(() => { try { safeInject(); } catch {} }, ms));
+  }
+  let navHooked = false;
+  function hookNavigation() {
+    if (navHooked) return; navHooked = true;
+    const fire = () => {
+      scheduleRetries();
+      setTimeout(() => { try { refreshBtnLabel(); } catch {} }, 600);
+    };
+    ['pushState', 'replaceState'].forEach(fn => {
+      try {
+        const orig = history[fn];
+        if (typeof orig === 'function') {
+          history[fn] = function (...a) { const r = orig.apply(this, a); setTimeout(fire, 0); return r; };
+        }
+      } catch {}
+    });
+    window.addEventListener('popstate', fire);
+    window.addEventListener('hashchange', fire);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => { safeInject(); scheduleRetries(); hookNavigation(); }, { once: true });
+  } else {
+    safeInject(); scheduleRetries(); hookNavigation();
+  }
+})();
