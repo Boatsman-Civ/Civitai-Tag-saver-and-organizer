@@ -1,28 +1,33 @@
 // ==UserScript==
-// @name         Civitai.red Tag Saver / Loader Dropdown
-// @namespace    Civitai-red-Tag-Saver
-// @version      1.5
-// @description  Adds a "Saved Tags" dropdown next to Everyone / Reactions / Filters on civitai.red Images & Videos. Save the current ?tags= set under a name, organize into folders, sort, search, click to reload.
+// @name         Civitai.red Tag Saver + Tag Decoder (Combined)
+// @namespace    Civitai-red-Combined
+// @version      2.0
+// @description  Tag Saver dropdown (folders/sort/search/scroll-fix) + Tag Decoder (numbers to English badge + panel). Both in one script for civitai.red.
 // @author       BAR
 // @match        https://civitai.red/*
-// @match        *://civitai.red/*
-// @match        https://civitai.red/videos
-// @grant        GM_openInTab
-// @grant        GM.openInTab
-// @grant        GM_xmlhttpRequest
-// @grant        GM_addStyle
-// @grant        GM_setValue
-// @grant        GM_getValue
-// @grant        GM_download
-// @grant        unsafeWindow
+// @match        http://civitai.red/*
+// @match        https://www.civitai.red/*
+// @grant        none
 // @run-at       document-start
+// @license      MIT
 // ==/UserScript==
 
 (function () {
-  'use strict';
-  try { if (window.top !== window.self) return; } catch { return; }
-  if (window.__civitTagsaverLoaded) return;
-  window.__civitTagsaverLoaded = true;
+'use strict';
+/* Single top-level guard: never run in iframes, never run twice */
+try { if (window.top !== window.self) return; } catch (e) { return; }
+if (window.__civitCombinedLoaded) return;
+window.__civitCombinedLoaded = true;
+/* Claim the legacy single-script flags too, so old installs alongside won't double-render */
+window.__civitTagsaverLoaded = true;
+window.__civitDecoderLoaded = true;
+
+/* ============================================================
+   MODULE 1 — TAG SAVER (v1.5: folders + sorting + scroll fix)
+   Own function scope: no name clashes with decoder below.
+   ============================================================ */
+function initTagSaver() {
+  /* (inner top-frame + singleton guards live on the outer combined wrapper) */
 
   const STORE_KEY = 'civitai_tag_presets_v1';
   const FOLDER_KEY = 'civitai_tag_folders_v1';
@@ -739,4 +744,189 @@
   } else {
     safeInject(); scheduleRetries(); hookNavigation();
   }
+
+}
+initTagSaver();
+
+/* ============================================================
+   MODULE 2 — TAG DECODER (v1.0.0: numbers -> English)
+   Deferred until DOM is ready because it touches document.head/body
+   on load, while this script runs at document-start.
+   ============================================================ */
+function initTagDecoder() {
+
+'use strict';
+
+const CACHE_KEY = 'civitai_tag_name_cache_v1';
+const cache = loadCache();
+function loadCache() { try { return JSON.parse(localStorage.getItem(CACHE_KEY) || '{}'); } catch { return {}; } }
+function saveCache() { try { localStorage.setItem(CACHE_KEY, JSON.stringify(cache)); } catch {} }
+
+// verified examples: 5146=sex, 5248=realistic, 116155=flat chest,
+// 4213=medium breasts, 115521=small breasts, 5784=large breasts
+Object.assign(cache, {
+  '5146': 'sex', '5248': 'realistic', '116155': 'flat chest',
+  '4213': 'medium breasts', '115521': 'small breasts', '5784': 'large breasts'
+});
+
+async function fetchName(id) {
+  id = String(id);
+  if (cache[id]) return cache[id];
+  try {
+    const u = `${location.origin}/api/trpc/tag.getById?batch=1&input=%7B%220%22%3A%7B%22json%22%3A%7B%22id%22%3A${encodeURIComponent(id)}%7D%7D%7D`;
+    const r = await fetch(u);
+    const j = await r.json();
+    const name = j?.[0]?.result?.data?.json?.name;
+    if (name) { cache[id] = name; saveCache(); return name; }
+  } catch {}
+  return null;
+}
+
+async function searchByName(query, limit = 8) {
+  try {
+    const input = encodeURIComponent(JSON.stringify({ query, limit }));
+    const u = `${location.origin}/api/trpc/tag.getAll?batch=1&input=%7B%220%22%3A%7B%22json%22%3A${input}%7D%7D`;
+    const r = await fetch(u);
+    const j = await r.json();
+    return j?.[0]?.result?.data?.json?.items?.slice(0, limit) || [];
+  } catch { return []; }
+}
+
+function getIdsFromURL() {
+  const m = location.search.match(/[?&]tags=([^&]+)/);
+  if (!m) return [];
+  return decodeURIComponent(m[1]).split(',').map(s => s.trim()).filter(s => /^\d+$/.test(s));
+}
+
+/* ---------- styles ---------- */
+const st = document.createElement('style');
+st.textContent = `
+#civ-decode-badge{display:inline-flex;align-items:center;gap:6px;margin-left:8px;padding:4px 12px;border-radius:999px;
+ background:linear-gradient(90deg,#ff2fb3,#7b2ff7);color:#fff;font-size:12.5px;font-weight:800;max-width:44vw;
+ overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;font-family:Inter,system-ui,sans-serif}
+#civ-decode-fab{position:fixed;left:16px;bottom:16px;z-index:999999;width:52px;height:52px;border-radius:50%;
+ font-size:24px;border:3px solid #fff;cursor:pointer;background:linear-gradient(135deg,#ffd32f,#ff2fb3);
+ box-shadow:0 8px 30px rgba(255,47,179,.5)}
+#civ-decode-panel{position:fixed;left:16px;bottom:78px;z-index:1000000;width:300px;max-height:66vh;overflow:auto;
+ background:rgba(15,15,25,.97);color:#fff;border:1px solid #ff2fb3;border-radius:14px;padding:14px;
+ font-family:Inter,system-ui,sans-serif;font-size:13px;box-shadow:0 12px 50px rgba(0,0,0,.6);display:none}
+#civ-decode-panel.open{display:block}
+#civ-decode-panel .tagrow{display:flex;align-items:center;gap:8px;background:#1d1d2b;border-radius:10px;padding:7px 9px;margin:6px 0}
+#civ-decode-panel code{background:#000;padding:2px 7px;border-radius:6px;color:#ffd32f;font-weight:800}
+#civ-decode-panel button{cursor:pointer;border:0;border-radius:8px;font-weight:800;padding:6px 10px}
+#civ-decode-panel input{width:100%;padding:8px;border-radius:8px;border:1px solid #555;background:#222;color:#fff;margin-top:6px;box-sizing:border-box}
+`;
+document.head.appendChild(st);
+
+/* ---------- floating button + panel ---------- */
+const fab = document.createElement('button');
+fab.id = 'civ-decode-fab';
+fab.title = 'Tag decoder — click to see what the numbers mean';
+fab.textContent = '🏷️';
+document.body.appendChild(fab);
+
+const panel = document.createElement('div');
+panel.id = 'civ-decode-panel';
+panel.innerHTML = `
+  <div style="font-weight:900;font-size:14px">🏷️ Tag Decoder</div>
+  <div id="cdd-current" style="opacity:.85;margin:6px 0">Reading URL…</div>
+  <div id="cdd-list"></div>
+  <div style="margin-top:8px;font-weight:800">🔍 Look up anything</div>
+  <input id="cdd-search" placeholder="type ID (4213) or name (sex)…">
+  <div id="cdd-results"></div>
+  <div style="opacity:.6;font-size:11px;margin-top:8px">Tip: click the pink badge in the filter bar to open this too.</div>`;
+document.body.appendChild(panel);
+
+fab.onclick = () => { panel.classList.toggle('open'); refresh(); };
+let searchT;
+panel.querySelector('#cdd-search').addEventListener('input', (e) => {
+  clearTimeout(searchT);
+  searchT = setTimeout(() => doSearch(e.target.value.trim()), 350);
+});
+panel.querySelector('#cdd-search').addEventListener('keydown', (e) => e.stopPropagation());
+
+async function doSearch(q) {
+  const box = panel.querySelector('#cdd-results');
+  if (!q) { box.innerHTML = ''; return; }
+  if (/^\d[\d,\s]*$/.test(q)) {
+    // ID -> name
+    const ids = q.split(/[\s,]+/).filter(Boolean).slice(0, 10);
+    box.innerHTML = 'looking up…';
+    const rows = [];
+    for (const id of ids) {
+      const n = await fetchName(id);
+      rows.push(`<div class="tagrow"><code>${id}</code><span style="flex:1">= <b>${n || '(not found)'}</b></span><button data-copy="${id}">copy</button></div>`);
+    }
+    box.innerHTML = rows.join('');
+  } else {
+    // name -> IDs
+    box.innerHTML = 'searching…';
+    const items = await searchByName(q);
+    if (!items.length) { box.innerHTML = '<div style="opacity:.6">no matches</div>'; return; }
+    box.innerHTML = items.map(t => `<div class="tagrow"><code>${t.id}</code><span style="flex:1">${t.name}</span><button data-use="${t.id}">use</button></div>`).join('');
+  }
+  box.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => { navigator.clipboard?.writeText(b.dataset.copy); b.textContent = '✓'; });
+  box.querySelectorAll('[data-use]').forEach(b => b.onclick = () => {
+    const url = new URL(location.href);
+    url.searchParams.set('tags', b.dataset.use);
+    location.href = url.toString();
+  });
+}
+
+async function refresh() {
+  const ids = getIdsFromURL();
+  const cur = panel.querySelector('#cdd-current');
+  const list = panel.querySelector('#cdd-list');
+  if (!ids.length) {
+    cur.textContent = 'No ?tags= in this URL. Try a tag feed, or search below.';
+    list.innerHTML = '';
+    updateBadge([]);
+    return;
+  }
+  cur.innerHTML = `This page: <code style="background:#000;padding:2px 6px;border-radius:6px;color:#ffd32f">tags=${ids.join(',')}</code>`;
+  list.innerHTML = ids.map(id => `<div class="tagrow"><code>${id}</code><span style="flex:1">= <i>…</i></span></div>`).join('');
+  const pairs = [];
+  const rows = [...list.children];
+  for (let i = 0; i < ids.length; i++) {
+    const name = await fetchName(ids[i]);
+    pairs.push({ id: ids[i], name: name || '(unknown)' });
+    rows[i].querySelector('span').innerHTML = `= <b>${name || '(unknown tag)'}</b>`;
+  }
+  updateBadge(pairs);
+}
+
+/* ---------- inline pink badge in filter bar ---------- */
+function updateBadge(pairs) {
+  let badge = document.getElementById('civ-decode-badge');
+  const anchor = document.querySelector('button[title="Followed"]')
+    || document.querySelector('button[title="Everyone"]')
+    || [...document.querySelectorAll('button')].find(b => ['Followed', 'Everyone'].includes((b.innerText || '').trim()));
+  if (!anchor || !anchor.parentElement) return;
+  if (!pairs.length) { badge?.remove(); return; }
+  if (!badge) {
+    badge = document.createElement('span');
+    badge.id = 'civ-decode-badge';
+    badge.title = 'Decoded by Tag Decoder — click to open';
+    badge.onclick = () => { panel.classList.add('open'); refresh(); };
+    anchor.parentElement.appendChild(badge);
+  }
+  const names = pairs.map(p => p.name).join(' + ');
+  badge.textContent = `🏷️ ${names}`;
+  badge.title = pairs.map(p => `${p.id} = ${p.name}`).join('\n') + '\n\nClick for decoder panel';
+}
+
+// init + watch SPA navigation
+let lastUrl = location.href;
+refresh();
+setInterval(() => {
+  if (location.href !== lastUrl) { lastUrl = location.href; refresh(); }
+  if (!document.getElementById('civ-decode-badge')) refresh();
+}, 1500);
+
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', function () { try { initTagDecoder(); } catch (e) { console.warn('[civit-combined][decoder]', e); } }, { once: true });
+} else {
+  try { initTagDecoder(); } catch (e) { console.warn('[civit-combined][decoder]', e); }
+}
 })();
